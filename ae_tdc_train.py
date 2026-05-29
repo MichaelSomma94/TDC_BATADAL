@@ -54,7 +54,7 @@ split_index = int(len(df_train) * 0.9)
 
 
 # smoothing with moving average
-X_train_smooth = moving_average(df_train.to_numpy(), 12, axis=0)
+X_train_smooth = df_train.to_numpy() #moving_average(df_train.to_numpy(), 12, axis=0)
 print(X_train_smooth.shape)
 X_train = X_train_smooth[:split_index]
 X_val = X_train_smooth[split_index:]
@@ -81,7 +81,7 @@ dataloader_val = DataLoader(val_dataset, batch_size=1, shuffle=False)
 # dataloader_test = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 neuron_count = len(measurements_columns)
-latent_det = 10
+latent_det = 12
 
 latent_stat = 4
 
@@ -95,10 +95,10 @@ def init_weights(m):
 
 
 AE = hTDCAutoEncoder(neuron_count, latent_det=latent_det, latent_stat=latent_stat).apply(init_weights)
-criterion = TDCLoss(h=1, alpha=10) #100 
+criterion = TDCLoss(h=1, alpha=20) #100 
 #training
-epochs = 40
-optimizer = torch.optim.Adam(AE.parameters(), lr=0.001)
+epochs = 30
+optimizer = torch.optim.Adam(AE.parameters(), lr=0.002)
 for epoch in range(epochs):
    
     AE.train()
