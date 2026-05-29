@@ -22,7 +22,7 @@ torch.cuda.manual_seed(seed)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-timestamp = "20260528_111038" 
+timestamp = "20260529_092357" 
 
 print(timestamp)
 
@@ -78,7 +78,7 @@ test_dataset = TensorDataset(X_test_temporal, torch.zeros(X_test_temporal.shape[
 dataloader_test = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 neuron_count = len(measurements_columns)
-latent_det = 12
+latent_det = 10
 
 latent_stat = 4
 
@@ -230,15 +230,17 @@ out = rectangle_flags(det_latent_train, rect)
 print(f"\nTraining points outside rectangle: {out.sum()} / {len(out)} "
       f"({100*out.mean():.2f}%)")
 
-fig, axes = plot_latent_with_rectangle(det_latent_train, rect, slice_range=(0, 3000))
+fig, axes = plot_latent_with_rectangle(det_latent_val, rect, slice_range=(0, 1000))
 plt.show()
 
 
 # ============================================================
-# POLYNOMIAL ENVELOPE FIT — initial window visualisation
+# POLYNOMIAL ENVELOPE FIT — configurable rolling visualisation
 # ============================================================
-INIT_TS    = 20 # first window
-POLY_DEGREE = 1   # start linear; bump to 2 if residuals look biased
+INIT_TS     = 12    # polynomial fitting window size
+POLY_DEGREE = 1     # 1 = linear; bump to 2 if residuals look biased
+PLOT_START  = 0     # first timestep to display
+PLOT_END    = 1000   # last  timestep to display
 
 
 def fit_poly_window(t_vals, z_vals, degree=1):
@@ -254,27 +256,75 @@ def plot_envelope_fit(
     init_ts=20,
     degree=1,
     mu=None, Sigma=None, tau=None,
+    plot_start=0,
+    plot_end=None,       # defaults to plot_start + init_ts (single window)
     figsize_per_row=(12, 2.2),
 ):
     """
-    For the window latent_array[0:init_ts]:
-      • Left column  : z_i (blue) + polynomial fit (orange dashed)
-                       + rect bounds (red dotted)
-                       + τ-tolerance band (orange shaded, if Sigma/tau provided)
-      • Right column : z_dot_i (green) + d/dt polynomial (orange dashed)
-                       + rect bounds (red dotted)
-                       + τ-tolerance band (orange shaded, if Sigma/tau provided)
+    Plots latent trajectories from plot_start to plot_end.
 
-    Tolerance band per dimension i:
-        fit ± τ · √Σ[i,i]
-    This is the projection of the joint Mahalanobis τ-ellipsoid onto each axis.
+    The displayed range is divided into non-overlapping windows of init_ts steps.
+    Each window gets its own polynomial fit (benign points only).
+    Vertical grey lines mark the window boundaries.
+
+    Columns
+    -------
+    Left  : z_i  (blue) + piecewise poly fit (orange dashed) +
+            rect bounds (red dotted) + τ-band (orange shaded)
+    Right : ż_i (green) + d/dt poly fit (orange dashed) +
+            rect bounds (red dotted) + derived τ-band (orange shaded)
+            band_ż = τ · √(Σ_z[i,i] / 2)  — propagated from z via central diff
+
+    Parameters
+    ----------
+    plot_start : int   first absolute timestep to display
+    plot_end   : int   last  absolute timestep to display
+                       (default: plot_start + init_ts → single-window mode)
     """
     n_dims = latent_array.shape[1]
     assert n_dims % 2 == 0, "latent_det must be even (z + z_dot halves)"
-    D      = n_dims // 2
-    t_win  = np.arange(init_ts)
-    window = latent_array[:init_ts]
+    D = n_dims // 2
 
+    if plot_end is None:
+        plot_end = plot_start + init_ts
+    plot_end = min(plot_end, len(latent_array))
+
+    t_abs  = np.arange(plot_start, plot_end)   # absolute time axis for plotting
+    n_plot = len(t_abs)
+
+    # ---- pre-compute sliding polynomial fits (step=1, lookback=init_ts) ----
+    # For each timestep t, window = latent_array[t-init_ts+1 : t+1] (ends at t inclusive).
+    # Polynomial is evaluated at the last relative position (= current point t).
+    # This is exactly what the online detector does, just visualised over the whole range.
+    z_fit_arr    = np.full((n_plot, D), np.nan)
+    zdot_fit_arr = np.full((n_plot, D), np.nan)
+
+    for idx in range(n_plot):
+        t         = plot_start + idx
+        win_s     = max(0, t - init_ts + 1)
+        win_e     = t + 1
+        actual_ts = win_e - win_s
+
+        if actual_ts < degree + 2:
+            continue
+
+        window      = latent_array[win_s:win_e]
+        t_rel       = np.arange(actual_ts, dtype=float)
+        benign_mask = ~rectangle_flags(window, rect)
+
+        if benign_mask.sum() < degree + 2:
+            continue
+
+        benign_pts = window[benign_mask]
+        benign_t   = t_rel[benign_mask]
+        t_eval     = float(actual_ts - 1)   # relative position of point t in window
+
+        for i in range(D):
+            poly, dpoly          = fit_poly_window(benign_t, benign_pts[:, i], degree)
+            z_fit_arr[idx, i]    = poly(t_eval)
+            zdot_fit_arr[idx, i] = dpoly(t_eval)
+
+    # ---- plotting ----
     fig, axes = plt.subplots(
         D, 2,
         figsize=(figsize_per_row[0], figsize_per_row[1] * D),
@@ -283,22 +333,20 @@ def plot_envelope_fit(
     )
 
     for i in range(D):
-        z_i    = window[:, i]
-        zdot_i = window[:, i + D]
-
-        poly, dpoly = fit_poly_window(t_win, z_i, degree=degree)
-        z_fit    = poly(t_win)
-        zdot_fit = dpoly(t_win)
+        z_i    = latent_array[plot_start:plot_end, i]
+        zdot_i = latent_array[plot_start:plot_end, i + D]
 
         # ---- z_i ----
         ax = axes[i, 0]
         if Sigma is not None and tau is not None:
             band = tau * np.sqrt(Sigma[i, i])
-            ax.fill_between(t_win, z_fit - band, z_fit + band,
+            ax.fill_between(t_abs,
+                            z_fit_arr[:, i] - band,
+                            z_fit_arr[:, i] + band,
                             alpha=0.25, color="tab:orange",
                             label=f"τ-envelope (τ={tau:.2f})")
-        ax.plot(t_win, z_i,   color="tab:blue",   lw=1.0, label=f"z_{i}")
-        ax.plot(t_win, z_fit, color="tab:orange", lw=1.8, ls="--",
+        ax.plot(t_abs, z_i,              color="tab:blue",   lw=1.0, label=f"z_{i}")
+        ax.plot(t_abs, z_fit_arr[:, i],  color="tab:orange", lw=1.8, ls="--",
                 label=f"poly k={degree}")
         ax.axhline(rect["low"][i],  color="tab:red", ls=":", lw=0.9,
                    label=rect["label_low"])
@@ -310,17 +358,17 @@ def plot_envelope_fit(
             ax.set_title(f"States  z   (poly degree {degree})")
             ax.legend(fontsize=8, loc="upper right")
 
-        # ---- z_dot_i ----
+        # ---- ż_i ----
         ax = axes[i, 1]
         if Sigma is not None and tau is not None:
-            # derived from z-only calibration via central-difference propagation:
-            # Var(r_ż) ≈ Var(r_z) / 2  →  band_ż = τ · √(Σ_z[i,i] / 2)
             band_dot = tau * np.sqrt(Sigma[i, i] / 2)
-            ax.fill_between(t_win, zdot_fit - band_dot, zdot_fit + band_dot,
+            ax.fill_between(t_abs,
+                            zdot_fit_arr[:, i] - band_dot,
+                            zdot_fit_arr[:, i] + band_dot,
                             alpha=0.25, color="tab:orange",
                             label=f"τ-envelope derived (τ={tau:.2f})")
-        ax.plot(t_win, zdot_i,   color="tab:green",  lw=1.0, label=f"ż_{i}")
-        ax.plot(t_win, zdot_fit, color="tab:orange",  lw=1.8, ls="--",
+        ax.plot(t_abs, zdot_i,              color="tab:green",  lw=1.0, label=f"ż_{i}")
+        ax.plot(t_abs, zdot_fit_arr[:, i],  color="tab:orange", lw=1.8, ls="--",
                 label="d/dt poly")
         ax.axhline(rect["low"][i + D],  color="tab:red", ls=":", lw=0.9)
         ax.axhline(rect["high"][i + D], color="tab:red", ls=":", lw=0.9)
@@ -334,7 +382,8 @@ def plot_envelope_fit(
     axes[-1, 1].set_xlabel("time step")
     tau_str = f", τ={tau:.3f}" if tau is not None else ""
     fig.suptitle(
-        f"Initial envelope fit — window [0:{init_ts}], poly degree {degree}{tau_str}",
+        f"Rolling envelope fit  [{plot_start}:{plot_end}], "
+        f"window={init_ts}, poly degree={degree}{tau_str}",
         y=1.01,
     )
     fig.tight_layout()
@@ -405,30 +454,56 @@ def calibrate_envelope(latent_array, rect, ts, k=1, coverage=0.99, eps=1e-4):
     m_cal = np.sqrt(np.einsum('ij,jk,ik->i', diff, Sigma_inv, diff))
     tau   = float(np.quantile(m_cal, coverage))
 
-    # --- TDC consistency check ---
-    # If TDC is well trained: std(r_ż_i) ≈ std(r_z_i) / √2
-    # Ratio close to 1 → model learned dynamics correctly
-    std_z_derived = np.sqrt(np.diag(Sigma)) / np.sqrt(2)   # expected ż std from z
-    std_zdot_obs  = Rzdot.std(axis=0)                       # observed ż std
-    ratio         = std_zdot_obs / std_z_derived
+    # --- TDC dynamic-consistency check (coverage parity) ---
+    #
+    # Two levels of check:
+    #
+    # 1) Per-dimension marginal — directly comparable to the visual plot.
+    #    Derived band: τ · √(Σ_z[i,i] / 2).  Verdict lives here.
+    #
+    # 2) Joint empirical — uses Σ_ż estimated directly from Rzdot (no theoretical
+    #    assumption about off-diagonals).  Low joint coverage when Σ_ż_empirical ≠ Σ_z/2
+    #    off-diagonally is NOT a TDC failure; it just means the temporal cross-correlation
+    #    structure of z breaks the i.i.d. assumption in the diagonal formula.
+    #    τ_ż is reported for comparison to τ_z (scale parity).
 
-    print(f"\nCalibration — {len(Rz):,} residuals, coverage={coverage:.0%}, τ={tau:.4f}")
-    print(f"TDC consistency  (std_ż_obs / std_ż_derived — ideal ≈ 1.0):")
-    for i in range(D):
-        bar = "█" * int(min(ratio[i], 3.0) * 10) + ("!" if ratio[i] > 2 else "")
-        print(f"  z_{i}:  {ratio[i]:.3f}  {bar}")
+    # 1) Per-dim marginal
+    dim_bands    = tau * np.sqrt(np.diag(Sigma) / 2)
+    dim_coverage = (np.abs(Rzdot) <= dim_bands).mean(axis=0)   # (D,)
+    mean_marginal = float(dim_coverage.mean())
+    gap_marginal  = abs(mean_marginal - coverage)
+    verdict = ("✓ consistent" if gap_marginal < 0.03
+               else ("⚠ moderate gap" if gap_marginal < 0.10
+                     else "✗ TDC underfit — derivatives noisier than states imply"))
+
+    # 2) Joint empirical Σ_ż (no Σ_z/2 assumption)
+    mu_zdot       = Rzdot.mean(axis=0)
+    Sig_zdot      = np.cov(Rzdot.T) + eps * np.eye(D)
+    Sig_zdot_inv  = np.linalg.inv(Sig_zdot)
+    diff_zdot     = Rzdot - mu_zdot
+    m_zdot_emp    = np.sqrt(np.einsum('ij,jk,ik->i', diff_zdot, Sig_zdot_inv, diff_zdot))
+    tau_zdot      = float(np.quantile(m_zdot_emp, coverage))   # empirical τ for ż
+
+    print(f"\nCalibration — {len(Rz):,} residuals, coverage={coverage:.0%}, τ_z={tau:.4f}")
+    print(f"TDC dynamic consistency:")
+    print(f"  z  joint coverage  : {coverage:.1%}  (by construction,  τ_z={tau:.4f})")
+    print(f"  ż  per-dim coverage: {' '.join(f'{c:.0%}' for c in dim_coverage)}")
+    print(f"  ż  mean marginal   : {mean_marginal:.1%}  ← verdict: {verdict}")
+    print(f"  ż  empirical τ_ż   : {tau_zdot:.4f}  (τ_z={tau:.4f},"
+          f" ratio={tau_zdot/tau:.3f} — ideal ≈ 1/√2 ≈ {1/np.sqrt(2):.3f})")
 
     return mu, Sigma, Sigma_inv, tau
 
 
-# ---- run calibration, then plot initial window with tolerance ----
+# ---- run calibration, then plot rolling envelope with tolerance ----
 mu_cal, Sigma_cal, Sigma_inv_cal, tau_cal = calibrate_envelope(
     det_latent_train, rect, ts=INIT_TS, k=POLY_DEGREE
 )
 
 fig2, axes2 = plot_envelope_fit(
-    det_latent_train, rect,
+    det_latent_test, rect,
     init_ts=INIT_TS, degree=POLY_DEGREE,
     mu=mu_cal, Sigma=Sigma_cal, tau=tau_cal,
+    plot_start=PLOT_START, plot_end=PLOT_END,
 )
 plt.show()

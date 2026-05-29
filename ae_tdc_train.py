@@ -81,7 +81,7 @@ dataloader_val = DataLoader(val_dataset, batch_size=1, shuffle=False)
 # dataloader_test = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 neuron_count = len(measurements_columns)
-latent_det = 12
+latent_det = 10
 
 latent_stat = 4
 
@@ -95,7 +95,7 @@ def init_weights(m):
 
 
 AE = hTDCAutoEncoder(neuron_count, latent_det=latent_det, latent_stat=latent_stat).apply(init_weights)
-criterion = TDCLoss(h=1, alpha=20) #100 
+criterion = TDCLoss(h=1, alpha=50) #100 
 #training
 epochs = 30
 optimizer = torch.optim.Adam(AE.parameters(), lr=0.002)
